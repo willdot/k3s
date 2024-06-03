@@ -109,7 +109,7 @@ func NewS3(ctx context.Context, config *config.Control) (*S3, error) {
 	if config.ClusterReset {
 		logrus.Debug("Skip setting S3 snapshot cluster ID and token during cluster-reset")
 	} else {
-		if err := wait.PollImmediateUntilWithContext(ctx, time.Second, func(ctx context.Context) (bool, error) {
+		if err := wait.PollUntilContextCancel(ctx, time.Second, true, func(ctx context.Context) (bool, error) {
 			if config.Runtime.Core == nil {
 				return false, nil
 			}
