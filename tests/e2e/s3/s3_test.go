@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/k3s-io/k3s/tests/e2e"
 	. "github.com/onsi/ginkgo/v2"
@@ -86,7 +87,31 @@ var _ = Describe("Verify Create", Ordered, func() {
 			fmt.Println(res)
 			Expect(err).NotTo(HaveOccurred())
 		})
-		It("save s3 snapshot", func() {
+		It("save s3 snapshot using CLI", func() {
+			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot save "+
+				"--etcd-s3-insecure=true "+
+				"--etcd-s3-bucket=test-bucket "+
+				"--etcd-s3-folder=test-folder "+
+				"--etcd-s3-endpoint=localhost:9090 "+
+				"--etcd-s3-skip-ssl-verify=true "+
+				"--etcd-s3-access-key=test ",
+				serverNodeNames[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(ContainSubstring("Snapshot on-demand-server-0"))
+		})
+		It("creates s3 config secret", func() {
+			res, err := e2e.RunCmdOnNode("k3s kubectl create secret generic k3s-etcd-s3-config --namespace=kube-system "+
+				"--from-literal=etcd-s3-insecure=true "+
+				"--from-literal=etcd-s3-bucket=test-bucket "+
+				"--from-literal=etcd-s3-folder=test-folder "+
+				"--from-literal=etcd-s3-endpoint=localhost:9090 "+
+				"--from-literal=etcd-s3-skip-ssl-verify=true "+
+				"--from-literal=etcd-s3-access-key=test ",
+				serverNodeNames[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res).To(ContainSubstring("secret/k3s-etcd-s3-config created"))
+		})
+		It("save s3 snapshot using secret", func() {
 			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot save", serverNodeNames[0])
 			Expect(err).NotTo(HaveOccurred())
 			Expect(res).To(ContainSubstring("Snapshot on-demand-server-0"))
@@ -126,10 +151,18 @@ var _ = Describe("Verify Create", Ordered, func() {
 			Expect(err).NotTo(HaveOccurred())
 			_, err = e2e.RunCmdOnNode("k3s etcd-snapshot save", serverNodeNames[0])
 			Expect(err).NotTo(HaveOccurred())
-			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot prune --snapshot-retention 2", serverNodeNames[0])
+			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot prune", serverNodeNames[0])
 			Expect(err).NotTo(HaveOccurred())
 			// There should now be 4 on-demand snapshots - 2 local, and 2 on s3
 			res, err = e2e.RunCmdOnNode("k3s etcd-snapshot ls 2>/dev/null | grep on-demand | wc -l", serverNodeNames[0])
+			Expect(err).NotTo(HaveOccurred())
+			Expect(strings.TrimSpace(res)).To(Equal("4"))
+		})
+		It("ensure snapshots retention is working in s3 and local", func() {
+			// Wait until the retention works with 3 minutes
+			fmt.Printf("\nWaiting 3 minutes until retention works\n")
+			time.Sleep(3 * time.Minute)
+			res, err := e2e.RunCmdOnNode("k3s etcd-snapshot ls 2>/dev/null | grep etcd-snapshot | wc -l", serverNodeNames[0])
 			Expect(err).NotTo(HaveOccurred())
 			Expect(strings.TrimSpace(res)).To(Equal("4"))
 		})

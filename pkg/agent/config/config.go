@@ -104,7 +104,7 @@ func APIServers(ctx context.Context, node *config.Node, proxy proxy.Proxy) []str
 			return false, err
 		}
 		if len(addresses) == 0 {
-			logrus.Infof("Waiting for apiserver addresses")
+			logrus.Infof("Waiting for supervisor to provide apiserver addresses")
 			return false, nil
 		}
 		return true, nil
@@ -206,7 +206,7 @@ func ensureNodePassword(nodePasswordFile string) (string, error) {
 		return nodePassword, err
 	}
 
-	if err = configureACL(nodePassword); err != nil {
+	if err = configureACL(nodePasswordFile); err != nil {
 		return nodePassword, err
 	}
 
@@ -371,14 +371,14 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to retrieve configuration from server")
 	}
-
 	// If the supervisor and externally-facing apiserver are not on the same port, tell the proxy where to find the apiserver.
 	if controlConfig.SupervisorPort != controlConfig.HTTPSPort {
-		isIPv6 := utilsnet.IsIPv6(net.ParseIP([]string{envInfo.NodeIP.String()}[0]))
+		isIPv6 := utilsnet.IsIPv6(net.ParseIP(util.GetFirstValidIPString(envInfo.NodeIP)))
 		if err := proxy.SetAPIServerPort(controlConfig.HTTPSPort, isIPv6); err != nil {
-			return nil, errors.Wrapf(err, "failed to setup access to API Server port %d on at %s", controlConfig.HTTPSPort, proxy.SupervisorURL())
+			return nil, errors.Wrapf(err, "failed to set apiserver port to %d", controlConfig.HTTPSPort)
 		}
 	}
+	apiServerURL := proxy.APIServerURL()
 
 	var flannelIface *net.Interface
 	if controlConfig.FlannelBackend != config.FlannelBackendNone && len(envInfo.FlannelIface) > 0 {
@@ -483,40 +483,53 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 
 	os.Setenv("NODE_NAME", nodeName)
 
+	// Ensure that the kubelet's server certificate is valid for all configured node IPs.  Note
+	// that in the case of an external CCM, additional IPs may be added by the infra provider
+	// that the cert will not be valid for, as they are not present in the list collected here.
 	nodeExternalAndInternalIPs := append(nodeIPs, nodeExternalIPs...)
+
+	// Ask the server to generate a kubelet server cert+key. These files are unique to this node.
 	servingCert, err := getServingCert(nodeName, nodeExternalAndInternalIPs, servingKubeletCert, servingKubeletKey, newNodePasswordFile, info)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, servingKubeletCert)
 	}
 
+	// Ask the server to genrate a kubelet client cert+key. These files are unique to this node.
 	if err := getNodeNamedHostFile(clientKubeletCert, clientKubeletKey, nodeName, nodeIPs, newNodePasswordFile, info); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, clientKubeletCert)
 	}
 
+	// Generate a kubeconfig for the kubelet.
 	kubeconfigKubelet := filepath.Join(envInfo.DataDir, "agent", "kubelet.kubeconfig")
-	if err := deps.KubeConfig(kubeconfigKubelet, proxy.APIServerURL(), serverCAFile, clientKubeletCert, clientKubeletKey); err != nil {
+	if err := deps.KubeConfig(kubeconfigKubelet, apiServerURL, serverCAFile, clientKubeletCert, clientKubeletKey); err != nil {
 		return nil, err
 	}
 
 	clientKubeProxyCert := filepath.Join(envInfo.DataDir, "agent", "client-kube-proxy.crt")
 	clientKubeProxyKey := filepath.Join(envInfo.DataDir, "agent", "client-kube-proxy.key")
+
+	// Ask the server to send us its kube-proxy client cert+key. These files are not unique to this node.
 	if err := getHostFile(clientKubeProxyCert, clientKubeProxyKey, info); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, clientKubeProxyCert)
 	}
 
+	// Generate a kubeconfig for kube-proxy.
 	kubeconfigKubeproxy := filepath.Join(envInfo.DataDir, "agent", "kubeproxy.kubeconfig")
-	if err := deps.KubeConfig(kubeconfigKubeproxy, proxy.APIServerURL(), serverCAFile, clientKubeProxyCert, clientKubeProxyKey); err != nil {
+	if err := deps.KubeConfig(kubeconfigKubeproxy, apiServerURL, serverCAFile, clientKubeProxyCert, clientKubeProxyKey); err != nil {
 		return nil, err
 	}
 
 	clientK3sControllerCert := filepath.Join(envInfo.DataDir, "agent", "client-"+version.Program+"-controller.crt")
 	clientK3sControllerKey := filepath.Join(envInfo.DataDir, "agent", "client-"+version.Program+"-controller.key")
+
+	// Ask the server to send us its agent controller client cert+key. These files are not unique to this node.
 	if err := getHostFile(clientK3sControllerCert, clientK3sControllerKey, info); err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, clientK3sControllerCert)
 	}
 
+	// Generate a kubeconfig for the agent controller.
 	kubeconfigK3sController := filepath.Join(envInfo.DataDir, "agent", version.Program+"controller.kubeconfig")
-	if err := deps.KubeConfig(kubeconfigK3sController, proxy.APIServerURL(), serverCAFile, clientK3sControllerCert, clientK3sControllerKey); err != nil {
+	if err := deps.KubeConfig(kubeconfigK3sController, apiServerURL, serverCAFile, clientK3sControllerCert, clientK3sControllerKey); err != nil {
 		return nil, err
 	}
 
@@ -532,6 +545,7 @@ func get(ctx context.Context, envInfo *cmds.Agent, proxy proxy.Proxy) (*config.N
 		FlannelExternalIP:        controlConfig.FlannelExternalIP,
 		EgressSelectorMode:       controlConfig.EgressSelectorMode,
 		ServerHTTPSPort:          controlConfig.HTTPSPort,
+		SupervisorPort:           controlConfig.SupervisorPort,
 		SupervisorMetrics:        controlConfig.SupervisorMetrics,
 		Token:                    info.String(),
 	}
